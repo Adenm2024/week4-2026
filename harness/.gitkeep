@@ -1,0 +1,17 @@
+# Your harness goes here.
+#
+# This is the directory where your test harness lives — the apparatus you
+# build to make the bug visible.
+#
+# What goes in here is up to you (and AI). Likely shape:
+#   - A driver script (Node, shell, Python — whatever you prefer) that
+#     starts the app, runs the failing scenario, and captures output.
+#   - A way to control timing so the race fires deterministically.
+#   - Logging that produces a legible trace.
+#
+# When you run your harness, save its output as `trace.txt` at the repo root.
+#
+# See the assignment README for the full task. See the study guide for prompt
+# patterns and what good harnesses look like.
+#
+# Note: this file is a placeholder. You can delete it once you commit your harness.

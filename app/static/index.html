@@ -1,0 +1,94 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <title>Draft Editor</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      max-width: 600px;
+      margin: 2em auto;
+      padding: 1em;
+    }
+    h1 { font-size: 1.4em; }
+    textarea {
+      width: 100%;
+      height: 8em;
+      font-family: monospace;
+      padding: 0.5em;
+      box-sizing: border-box;
+    }
+    button {
+      padding: 0.6em 1.2em;
+      margin-right: 0.5em;
+      font-size: 1em;
+      cursor: pointer;
+    }
+    .status {
+      margin-top: 1em;
+      padding: 0.5em;
+      background: #f0f0f0;
+      font-family: monospace;
+      white-space: pre-wrap;
+    }
+    .published {
+      margin-top: 1em;
+      padding: 0.5em;
+      border: 1px solid #ccc;
+    }
+    .published-label {
+      font-size: 0.8em;
+      color: #666;
+      text-transform: uppercase;
+    }
+  </style>
+</head>
+<body>
+  <h1>Draft Editor</h1>
+  <p>Type something. Click Save. Type more, then Publish quickly.</p>
+
+  <textarea id="editor" placeholder="Type your draft here..."></textarea>
+  <div style="margin-top: 0.5em;">
+    <button id="save">Save</button>
+    <button id="publish">Publish</button>
+  </div>
+
+  <div class="status" id="status">Ready.</div>
+
+  <div class="published">
+    <div class="published-label">Published</div>
+    <div id="published-content">(nothing published yet)</div>
+  </div>
+
+  <script>
+    const editor = document.getElementById('editor');
+    const statusEl = document.getElementById('status');
+    const publishedEl = document.getElementById('published-content');
+
+    function log(msg) {
+      const ts = new Date().toISOString().substring(11, 23);
+      statusEl.textContent = `[${ts}] ${msg}\n` + statusEl.textContent;
+    }
+
+    document.getElementById('save').addEventListener('click', async () => {
+      const content = editor.value;
+      log(`save sent: "${content}"`);
+      const res = await fetch('/draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content }),
+      });
+      const data = await res.json();
+      log(`save committed: "${data.saved}"`);
+    });
+
+    document.getElementById('publish').addEventListener('click', async () => {
+      log(`publish sent`);
+      const res = await fetch('/publish', { method: 'POST' });
+      const data = await res.json();
+      log(`publish returned: "${data.published}"`);
+      publishedEl.textContent = data.published || '(empty)';
+    });
+  </script>
+</body>
+</html>
