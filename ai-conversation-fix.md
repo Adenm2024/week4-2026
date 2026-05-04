@@ -468,3 +468,123 @@ Verification artifacts:
 - `harness/run-race.js` — race scenario no longer reproduces; the trace
   shows publish waiting for `draft.committed` before reading.
 - `trace.txt` — captures the post-fix timeline.
+
+---
+
+## Follow-up checks on trace observability and git state
+
+The user asked whether a terminal snippet showing:
+
+```bash
+touch recommit.txt
+git add recommit.txt
+git commit -m 'recommitting to cause github actions to fire'
+```
+
+meant the commit existed and whether it helped observability. The assistant
+explained that a terminal command alone does not prove a commit exists in git
+history, and a recommit by itself does not improve observability. It can
+re-trigger GitHub Actions, but the race only becomes visible through the
+harness and instrumentation.
+
+The assistant checked the local workspace and found `recommit.txt` was missing,
+then added an empty `recommit.txt` file. It was left untracked; nothing was
+staged or committed.
+
+The user then saw a rejected push:
+
+```text
+! [rejected]        race-fix -> race-fix (non-fast-forward)
+Your branch and 'origin/race-fix' have diverged,
+and have 1 and 2 different commits each, respectively.
+```
+
+The assistant explained that local `race-fix` and `origin/race-fix` each had
+unique commits. The suggested resolution was to commit any intended staged work
+first, then integrate the remote branch with:
+
+```bash
+git pull --rebase origin race-fix
+git push origin race-fix
+```
+
+The user also ran:
+
+```bash
+git push origin master
+```
+
+and Git reported `Everything up-to-date`, which only confirmed that `master`
+had nothing new to push. It did not resolve the separate `race-fix` divergence.
+
+The user asked whether the repository contains both forms of race-condition
+observability:
+
+1. A test harness that drives HTTP endpoints, simulates user actions, uses
+   controlled timing / artificial delays, and produces a clear log.
+2. Code-level instrumentation inside the app.
+
+The assistant checked the repo and confirmed both are present:
+
+- `harness/run-race.js` starts `app/server.js` with `TRACE_RACE=1`,
+  `TRACE_START_MS`, `SAVE_COMMIT_DELAY_MS=300`, and `PORT=3100`, then drives
+  `POST /reset`, `POST /draft`, and `POST /publish`.
+- `harness/run-race.js` writes a merged client/server timeline to `trace.txt`.
+- `harness/race-harness.js` also runs HTTP scenarios in process and sweeps
+  publish offsets with `sleep(publishOffsetMs)`.
+- `tests/race.test.js` is a regression test that controls save timing and
+  fires publish while save B is in flight.
+- `app/server.js` has app-level trace instrumentation gated by `TRACE_RACE=1`.
+
+The trace capture was checked without re-running the harness. `trace.txt`
+already showed a captured harness run against the instrumented app:
+
+```text
+# Lines from [client       ] are emitted by harness/run-race.js.
+# Lines from [server #NNN  ] are emitted by app/server.js when TRACE_RACE=1.
+```
+
+The trace includes the fields needed to make the race visible:
+
+- timestamps, such as `[+ 6365ms]`;
+- event/request tags, such as `draft.received`, `publish.received`,
+  `draft.committed`, `publish.read`, and `publish.assigned`;
+- payload/state values, such as `content="draft B"`,
+  `currentDraftBeforeWait="draft A"`, `currentDraftRead="draft B"`, and
+  `publishedDraft="draft B"`.
+
+Key captured trace excerpt:
+
+```text
+[+ 6365ms] [server #009] draft.received content="draft B"
+[+ 6366ms] [server #010] publish.received currentDraftBeforeWait="draft A"
+[+ 6667ms] [server #011] draft.committed content="draft B"
+[+ 6668ms] [server #012] publish.read currentDraftRead="draft B"
+[+ 6668ms] [server #013] publish.assigned publishedDraft="draft B"
+```
+
+The assistant noted that GitHub Actions ran `npm test`, but did not yet run
+`npm run harness`, so the harness existed and worked but was not automatically
+run by CI.
+
+The user then asked to include `npm run harness`. The assistant updated
+`.github/workflows/test.yml` to add a `Run race harness` step before
+`npm test`:
+
+```yaml
+- name: Run race harness
+  run: |
+    set +e
+    npm run harness
+    code=$?
+    set -e
+    if [ "$code" -ne 0 ] && [ "$code" -ne 1 ]; then
+      exit "$code"
+    fi
+    echo "Accepted harness exit code $code (0=race reproduced, 1=no race observed)."
+```
+
+This keeps the harness output visible in GitHub Actions logs while respecting
+the harness's documented exit codes: `0` means the race reproduced, and `1`
+means the fixed app did not reproduce the race. Unexpected harness errors still
+fail CI.
