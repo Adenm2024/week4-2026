@@ -20,6 +20,11 @@ app.use(express.static(path.join(__dirname, 'static')));
 // is fine — the bug is in the timing, not the storage.
 let currentDraft = '';
 let publishedDraft = '';
+let pendingSave = Promise.resolve();
+// Bumped on /reset. Each in-flight /draft captures the epoch at request time
+// and refuses to commit if the epoch has changed by the time its setTimeout
+// fires, so a save that started before /reset can't clobber post-reset state.
+let saveEpoch = 0;
 
 // SAVE_COMMIT_DELAY_MS controls how long a /draft request takes to commit.
 // In production this would represent database write latency, network latency,
@@ -68,8 +73,8 @@ function trace(event, data) {
 
 // POST /draft — save the current draft text.
 //
-// Note the artificial delay: the draft is not committed to currentDraft
-// until SAVE_COMMIT_DELAY_MS milliseconds after the request arrives.
+// Each save is queued behind the previous one. That gives /publish a single
+// promise to await so it never reads currentDraft while a save is mid-commit.
 app.post('/draft', (req, res) => {
   const { content } = req.body;
   if (typeof content !== 'string') {
@@ -77,22 +82,58 @@ app.post('/draft', (req, res) => {
   }
 
   trace('draft.received', { content });
+  const epoch = saveEpoch;
 
-  // Simulate write latency.
-  setTimeout(() => {
-    currentDraft = content;
-    trace('draft.committed', { content });
-    res.json({ ok: true, saved: content });
-  }, SAVE_COMMIT_DELAY_MS);
+  // .catch(() => {}) keeps the chain consumable: if a previous save's promise
+  // ever rejects, this swallows it so the new save (and every later /publish
+  // awaiting pendingSave) still runs instead of silently inheriting a
+  // poisoned chain.
+  pendingSave = pendingSave.catch(() => {}).then(
+    () =>
+      new Promise((resolve) => {
+        // Simulate write latency.
+        setTimeout(() => {
+          if (epoch === saveEpoch) {
+            currentDraft = content;
+            trace('draft.committed', { content });
+          } else {
+            trace('draft.discarded', {
+              content,
+              epoch,
+              currentEpoch: saveEpoch,
+            });
+          }
+          resolve();
+        }, SAVE_COMMIT_DELAY_MS);
+      }),
+  );
+
+  pendingSave.then(
+    () => {
+      res.json({ ok: true, saved: content });
+    },
+    () => {
+      if (!res.headersSent) {
+        res.status(500).json({ error: 'save failed' });
+      }
+    },
+  );
 });
 
 // POST /publish — mark the most recent saved draft as live.
 //
-// THE BUG: this reads currentDraft *immediately*. If a /draft request is
-// in flight (its timeout hasn't fired), publishedDraft will be set to the
-// older saved value, not the in-flight one.
-app.post('/publish', (req, res) => {
-  trace('publish.received', { currentDraftRead: currentDraft });
+// Wait for any in-flight save to commit before reading currentDraft.
+app.post('/publish', async (req, res) => {
+  trace('publish.received', { currentDraftBeforeWait: currentDraft });
+  // /draft swallows rejections, so pendingSave should always be fulfilled.
+  // Defend against a future change that breaks that invariant — a rejection
+  // here must not take down the publish handler.
+  try {
+    await pendingSave;
+  } catch (_) {
+    // Fall through and publish whatever is currently committed.
+  }
+  trace('publish.read', { currentDraftRead: currentDraft });
   publishedDraft = currentDraft;
   trace('publish.assigned', { publishedDraft });
   res.json({ ok: true, published: publishedDraft });
@@ -110,9 +151,11 @@ app.get('/current', (req, res) => {
 
 // Reset endpoint for tests.
 app.post('/reset', (req, res) => {
+  saveEpoch += 1;
   currentDraft = '';
   publishedDraft = '';
-  trace('reset');
+  pendingSave = Promise.resolve();
+  trace('reset', { newEpoch: saveEpoch });
   res.json({ ok: true });
 });
 
