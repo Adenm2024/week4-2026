@@ -588,3 +588,112 @@ This keeps the harness output visible in GitHub Actions logs while respecting
 the harness's documented exit codes: `0` means the race reproduced, and `1`
 means the fixed app did not reproduce the race. Unexpected harness errors still
 fail CI.
+
+The user added a marker line inside `recommit.txt`:
+
+```text
+Recommit marker to trigger GitHub Actions.
+```
+
+The user then asked to commit the changes, and the assistant created commit
+`811457b Run race harness in CI`, which included
+`.github/workflows/test.yml`, `ai-conversation-fix.md`, and `recommit.txt`.
+
+---
+
+## Critical review of the fix
+
+The user asked for a critical, senior-engineer-style review of the fixed
+code in `app/server.js`, including failure modes it does not address, edge
+cases missed, assumptions baked in, alternatives, and concrete pushback
+points. The user asked the assistant to show the result first, before making
+any changes.
+
+The assistant produced a thorough review covering the items below. The full
+text was then saved to `review.md` at the repo root.
+
+### Failure modes the fix does not address
+
+1. Head-of-line blocking on `/publish` — publish awaits the entire pending
+   chain instead of just the latest in-flight save.
+2. Unbounded promise chain growth — `pendingSave` is never trimmed.
+3. `/draft` HTTP latency scales with queue depth × `SAVE_COMMIT_DELAY_MS`.
+4. `/publish` vs `/reset` is not synchronized; concurrent reset can clear
+   `currentDraft` between publish's await and its read.
+5. Late-arriving saves are not waited on by an in-flight publish.
+6. `/draft` returns `{ ok: true, saved: ... }` even when the save was
+   discarded due to an epoch change.
+7. `pendingSave.catch(() => {})` silently swallows every commit-side error.
+8. `/draft`'s `onrejected` response branch is unreachable because of (7).
+9. No timeout or cancellation on a stuck save; everything blocks forever.
+10. The whole design assumes one Node process, in-memory state.
+11. No durability — a crash loses every draft.
+12. `traceEvents` grows unbounded when `TRACE_RACE=1`.
+
+### Edge cases not covered by tests / harness
+
+- Two concurrent `/publish` requests.
+- `/reset` arriving during a `/publish` await.
+- `/reset` arriving between two queued saves.
+- A `/draft` whose `setTimeout` never fires.
+- More than two concurrent `/draft`s.
+- Empty `content`.
+- Very large `content` (no length cap or rate limit).
+- Non-ASCII or binary-like strings.
+- HTTP client disconnect mid-request.
+
+### Assumptions baked into the fix
+
+- One Node process, one event loop, in-memory state.
+- The artificial `SAVE_COMMIT_DELAY_MS` is the only latency source.
+- Callers `await` their `/draft` if they care about ordering.
+- `/reset` is only invoked by tests; it has no auth or rate limit.
+- Express handlers are atomic only within their synchronous body, not across
+  `await` points.
+
+### Cleaner alternatives a senior engineer would suggest
+
+1. Use an explicit async mutex around the read/write critical section.
+2. Use a version counter and have `/publish` await only the latest version.
+3. Coalesce or "latest-wins" pending saves rather than queueing all of them.
+4. Push the consistency concern down to the storage layer (e.g.
+   `SELECT … FOR UPDATE`).
+5. Make `/draft` respond on enqueue, not after commit.
+6. Replace the silent `.catch(() => {})` with explicit error logging.
+7. Apply the epoch check inside `/publish` too, so it is consistent with
+   `/draft`.
+
+### Pushback points worth blocking on in code review
+
+- `/draft` blocking its HTTP response on commit.
+- `/publish` waiting on the whole save chain instead of the latest save.
+- Silent error swallowing via `.catch(() => {})`.
+- Unreachable `onrejected` arm in `/draft`.
+- Undocumented contract for `/publish` + `/reset` concurrency.
+- Missing tests for concurrent publishes, concurrent saves, and reset
+  interleavings.
+- Single-process assumption being undocumented.
+- Unbounded `traceEvents` array under `TRACE_RACE=1`.
+
+### Net summary
+
+The fix is **correct for the harness/test scenario** (save A committed, save
+B in flight, publish fires, publish must see save B). It serializes saves
+and makes publish wait on the queue.
+
+It is **not robust** for: concurrent publishes, `/reset` racing with
+`/publish`, save chains under load, stuck saves, multi-process deployments,
+or any future refactor that introduces a real exception in the commit path.
+The HTTP semantics of `/draft` are also poor (latency scales with queue
+depth; misleading success on discard).
+
+If reviewed as a real production PR, items worth blocking on at minimum are:
+head-of-line blocking on `/publish`, `/draft` response latency under load,
+`/publish` vs `/reset` synchronization, the misleading `/draft` HTTP
+response on discard, and the silent `.catch(() => {})`.
+
+### What was committed for the review
+
+The full review text was written to `review.md` and committed as
+`5548b34 Add critical review of the race fix`. The branch `race-fix` is now
+ahead of `origin/race-fix` by 2 commits and has not been pushed.
