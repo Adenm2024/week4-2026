@@ -341,6 +341,114 @@ not yet contain the fix.
 
 ---
 
+## 14. GitHub branches, Ubuntu verification, and Actions workflow
+
+**User asked why GitHub showed two branches.**
+
+**Assistant explained:** this is expected for the assignment workflow.
+
+- `master` is the pristine baseline branch, still at the initial commit.
+- `race-fix` is the feature branch containing the harness, instrumentation,
+  fix, and AI conversation transcript.
+- The next assignment step is a PR from `race-fix` into `master`.
+
+**User verified on Ubuntu:**
+
+```bash
+npm test
+```
+
+Output showed:
+
+```text
+pass 2
+fail 0
+```
+
+**User also ran:**
+
+```bash
+npm run harness
+```
+
+The harness output showed:
+
+```text
+publish.received currentDraftBeforeWait="draft A"
+draft.committed content="draft B"
+publish.read currentDraftRead="draft B"
+publish.assigned publishedDraft="draft B"
+RACE RESULT: published="draft B" (expected "draft B") -> no race observed
+```
+
+**Assistant explained:** this is the desired fixed behavior. Publish arrived
+while save B was in flight, but waited for the pending save to commit before
+reading `currentDraft`. The harness wrote a refreshed `trace.txt`.
+
+The harness printed:
+
+```text
+[harness] exit code: 1
+```
+
+**Assistant clarified:** in this harness, exit code `1` means "race did not
+reproduce." That is expected after the fix. It is not an application problem.
+
+**User reported GitHub Actions text like:**
+
+```text
+.github/workflows/test.yml #5: Commit e628835 pushed by Adenm2024
+```
+
+**Assistant explained:** that line is just the GitHub Actions run title. It
+does not by itself mean failure. To know the result, open the run and look for
+green check / red X / running status, then inspect the failing job step if
+needed.
+
+Before that, the workflow file had been discovered to be empty, so the
+assistant added a real Node 20 GitHub Actions workflow:
+
+```yaml
+name: Tests
+
+on:
+  push:
+    branches: [master, race-fix]
+  pull_request:
+    branches: [master]
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Run tests
+        run: npm test
+```
+
+Local `npm test` still passed after adding the workflow. The assistant
+instructed the user to commit and push that workflow change from WSL:
+
+```bash
+git add .github/workflows/test.yml
+git commit -m "Add GitHub Actions test workflow"
+git push origin race-fix
+```
+
+---
+
 ## Final state of `app/server.js`
 
 Key contract enforced by the fix:
