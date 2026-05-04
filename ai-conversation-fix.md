@@ -697,3 +697,176 @@ response on discard, and the silent `.catch(() => {})`.
 The full review text was written to `review.md` and committed as
 `5548b34 Add critical review of the race fix`. The branch `race-fix` is now
 ahead of `origin/race-fix` by 2 commits and has not been pushed.
+
+---
+
+## Re-verification of the eight pushback points
+
+The user asked the assistant to re-check each pushback point against the
+actual source and to document the verified findings in `review.md` and in
+this transcript. Each point was checked against `app/server.js` and
+`tests/race.test.js`. All eight were confirmed true.
+
+### 1. `/draft` blocks its HTTP response on commit
+
+The response handler at `app/server.js` lines 111–120 is attached to
+`pendingSave`. `pendingSave` only resolves after the `setTimeout` at line
+95–107 fires. The HTTP `200` therefore cannot be sent until the entire
+queue ahead of this save also commits. Latency for save N is roughly
+`N * SAVE_COMMIT_DELAY_MS`.
+
+### 2. `/publish` waits for the whole save chain instead of just the latest in-flight save
+
+`app/server.js` line 132 does `await pendingSave;`. `pendingSave` is the
+*tail* of the chain at await time, so all earlier queued saves are also
+awaited even though only the last save's value is read at line 137.
+
+### 3. `.catch(() => {})` silently swallows commit-side errors
+
+`app/server.js` line 91 does
+`pendingSave = pendingSave.catch(() => {}).then(...)`. The empty handler
+discards every prior rejection without logging it. A real commit-side bug
+would never surface.
+
+### 4. The `onrejected` arm of `/draft`'s response handler is unreachable
+
+The chain `previous.catch(() => {}).then(commit)` at lines 91–109 cannot
+reject: `.catch(() => {})` cleans previous rejections, and the `commit`
+callback only ever calls `resolve()` (no throw, no `reject`). The
+`onrejected` arm at lines 115–119 cannot fire under the current code path.
+It is dead error handling that *looks* defensive but isn't.
+
+### 5. The `/publish` + `/reset` concurrency contract is not documented or enforced
+
+`/reset` at lines 153–160 is fully synchronous: it bumps `saveEpoch`,
+clears `currentDraft` and `publishedDraft`, and reassigns `pendingSave`.
+There is no synchronization between `/reset` and `/publish`. If `/reset`
+runs between `/publish`'s `await pendingSave` (line 132) and
+`publishedDraft = currentDraft` (line 137), `/publish` will publish the
+cleared empty value. No comment in `app/server.js` documents this, and no
+test covers it.
+
+### 6. There is no test for concurrent publishes, concurrent saves, or `/reset` during a publish
+
+`tests/race.test.js` only contains two tests:
+
+- “publish reflects the most recent save, even when save is in flight” —
+  one save A, one save B in flight, one publish.
+- “publish reflects the saved value when no save is in flight” — one save,
+  one publish.
+
+There is no coverage of:
+
+- Two or more concurrent `/publish`es.
+- Three or more concurrent `/draft`s.
+- `/reset` interleaved with an in-flight `/publish`.
+- `/reset` interleaved with multiple `/draft`s.
+
+### 7. `saveEpoch` and the save chain assume a single Node process, and that assumption is not documented
+
+`currentDraft`, `publishedDraft`, `pendingSave`, and `saveEpoch` are
+module-level `let`s at `app/server.js` lines 21–27. They are not shared
+between processes. Under `pm2 -i 2`, behind a load balancer with multiple
+replicas, or in a Node cluster, the original race re-emerges across
+processes. There is no comment in `app/server.js` calling out the
+single-process assumption.
+
+### 8. `traceEvents` grows forever when `TRACE_RACE=1`
+
+`traceEvents` is declared at line 51 and pushed into at line 60
+unconditionally when `TRACE` is true. There is no cap, no rotation, and no
+flushing in the server. The harness clears it between scenarios via
+`traceEvents.length = 0`, but only the *harness* does that, not the
+server. With `TRACE_RACE=1` set in a long-running deployment, this is an
+unbounded memory leak. The flag is also not documented as “for tests
+only.”
+
+### Verification summary
+
+All eight pushback points are reproducible by reading the indicated lines
+in `app/server.js` and `tests/race.test.js`. None of them were
+exaggerated. The fix is correct for the harness's narrow scenario, but
+fails to satisfy the safety, observability, operational, and testing
+properties one would expect of production code. The verified findings are
+documented in `review.md`.
+
+---
+
+## Edge-case fixes applied
+
+The user asked for code changes that address the nine edge cases the
+review identified as untested or unhandled. The assistant updated
+`app/server.js` and added a new test file `tests/edge.test.js` with one
+test per edge case. The full test suite (11 tests) passes and the harness
+continues to report "no race observed."
+
+### Changes in `app/server.js`
+
+- `/publish` now captures `epochAtEntry = saveEpoch` at function entry.
+  After the await, if `saveEpoch !== epochAtEntry`, it returns `409
+  publish aborted: state was reset during await`. This addresses the
+  `/reset` vs `/publish` race.
+- `/publish` awaits via `withTimeout(pendingSave, SAVE_MAX_WAIT_MS,
+  'publish.await')` so a stuck `setTimeout` (suspended VM, fake timers,
+  clock skew) cannot wedge the handler. On timeout the trace records
+  `publish.await.failed` and the handler proceeds with the most recent
+  committed state, or aborts via the epoch check.
+- `/draft` no longer claims `{ ok: true, saved: ... }` for a discarded
+  save. The commit promise resolves with `{ committed: bool }`, and the
+  response handler returns `200` for committed saves and `409 save
+  discarded: state was reset before commit` otherwise.
+- The previously silent `pendingSave.catch(() => {})` is now
+  `pendingSave.catch((err) => trace('chain.error.swallowed', ...))`. The
+  chain stays consumable but errors are visible in the trace.
+- Body size is capped via `express.json({ limit: BODY_LIMIT })` (default
+  `'256kb'`), and `/draft` enforces a per-request `MAX_CONTENT_CHARS`
+  ceiling (default `65536`). Both produce clean `413` JSON responses.
+- A new Express error handler turns `entity.too.large` and
+  `entity.parse.failed` into structured JSON instead of HTML pages.
+- All `res.json` calls go through a `safeJson` helper that checks
+  `res.headersSent`, `res.writableEnded`, `res.socket.destroyed`, and
+  `res.req.aborted` before writing, and try/catches the write. A closed
+  socket is a no-op rather than a crash.
+- Trace event payloads that the harness depends on (`content`,
+  `currentDraftBeforeWait`, `currentDraftRead`, `publishedDraft`,
+  `newEpoch`) are unchanged, so `harness/run-race.js` and
+  `harness/race-harness.js` keep working.
+
+### New tests in `tests/edge.test.js`
+
+One test per edge case:
+
+1. Two concurrent `/publish` calls both return `200` with the saved value.
+2. `/reset` during a `/publish` await is detected via the epoch check;
+   publish returns either `409` or a value drawn from the legitimate
+   state space.
+3. `/reset` between queued saves discards the pre-reset save and lets the
+   post-reset save commit; `/current` reflects the post-reset value.
+4. Many saves followed by an immediate publish must finish within a
+   generous time bound (smoke test for `withTimeout`).
+5. Five concurrent `/draft` calls all return `200` and the last save wins
+   on `/publish`.
+6. Empty content is accepted as a valid draft.
+7. Content above `MAX_CONTENT_CHARS` is rejected with `413`.
+8. Non-ASCII content (`'日本語テスト 🚀 — café'`) round-trips unchanged.
+9. A client disconnect mid-request does not crash the server; a follow-up
+   request immediately afterward still works.
+
+### Verification
+
+- `npm test` reports `tests 11 / pass 11 / fail 0`.
+- `npm run harness` exits with code `1`, which is the documented
+  "no race observed" state for the fixed code.
+- No new linter errors in `app/server.js` or `tests/edge.test.js`.
+
+### What is still out of scope
+
+The user's request was specifically about the nine edge cases. The
+following items from the broader review were *not* addressed in this
+round and remain noted in `review.md`:
+
+- Head-of-line blocking on `/publish`.
+- `/draft` HTTP latency scaling with queue depth.
+- Multi-process deployment.
+- Durability across process restart.
+- Unbounded `traceEvents` array under `TRACE_RACE=1`.
