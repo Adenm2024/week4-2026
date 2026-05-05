@@ -105,6 +105,7 @@ production for diagnostics, that is a memory leak.
 
 ---
 
+---
 ## Assumptions the fix bakes in
 
 - One Node process, one event loop, in-memory state.
@@ -509,3 +510,12 @@ left for a follow-up:
 - Durability / persistence (item 11 of the failure modes).
 - Unbounded `traceEvents` array under `TRACE_RACE=1` (item 12 of the
   failure modes).
+
+Engement with the reviewer said:
+
+1. ONLY- THE BELOW EDGE CASES were taken seriously as they are real concern, and was addressed and incorporated to the code for correction. Because edge cases are logical problems which will result the application to crash/perform poorly.
+
+
+2. Though the assumptions the fix bakes is a real concern, but out of context. As this assignment is a practice intended to ensure the publish waits while draft and save is complete. and only finally saved contents are published. Therefore, one nood and one event is feasible.
+
+3. The seven points/concerns a senior engineer would push back was left unadressed though they are good options but they are out of context in here. As this assignment is a practice intended to ensure the publish waits while draft and save is complete. and only finally saved contents are published.
