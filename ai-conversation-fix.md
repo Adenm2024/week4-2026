@@ -957,3 +957,97 @@ git pull --rebase origin race-fix
 If the EC2 box has its own divergent commits, the same `--theirs`
 strategy on `trace.txt` (or any other harness-generated file) applies
 there too.
+
+---
+
+## Adding before-and-after trace evidence
+
+The user asked about the reviewer note:
+
+> `trace.txt` is from the fixed code, so consider committing a pre-fix capture
+> alongside it so the race is visible directly in the trace file as well as in
+> the AI conversation.
+
+The assistant explained that the current `trace.txt` only shows the fixed
+behavior: `/publish` waits for save B to commit and then publishes
+`"draft B"`. To make the bug visible directly in the repository artifacts,
+the branch should also include a before-fix trace file:
+
+- `trace-before-fix.txt` — captured from the broken version, showing
+  `published="draft A"` and `BUG REPRODUCED`.
+- `trace.txt` — captured from the fixed version, showing
+  `published="draft B"` and `no race observed`.
+
+The assistant identified commit `b5808c7 Add race-condition harness and trace
+instrumentation` as the pre-fix harness commit and suggested extracting the
+old trace from it:
+
+```bash
+git show b5808c7:trace.txt > trace-before-fix.txt
+```
+
+Then the user verified the pre-fix trace. `rg` was not installed in the WSL
+terminal, so the assistant suggested `grep -E` instead:
+
+```bash
+grep -E 'BUG REPRODUCED|published="draft A"' trace-before-fix.txt
+```
+
+The command printed:
+
+```text
+[+ 8136ms] [client       ] RACE RESULT: published="draft A" (expected "draft B") -> BUG REPRODUCED (stale value)
+race scenario:        BUG REPRODUCED (publish saw stale value)
+```
+
+The user then verified the fixed trace:
+
+```bash
+grep -E 'no race observed|published="draft B"' trace.txt
+```
+
+The command printed:
+
+```text
+[+ 6827ms] [client       ] RACE RESULT: published="draft B" (expected "draft B") -> no race observed
+race scenario:        no race observed
+```
+
+The assistant explained that these two outputs prove both sides of the race:
+the old code published stale `"draft A"`, while the fixed code waited and
+published `"draft B"`.
+
+The assistant also explained this commit command:
+
+```bash
+git commit -m "$(cat <<'EOF'
+Add before-and-after race traces
+
+EOF
+)"
+```
+
+It is a heredoc-based way to pass a commit message to `git commit -m`. For a
+simple one-line message, it is equivalent to:
+
+```bash
+git commit -m "Add before-and-after race traces"
+```
+
+The user staged and committed the trace evidence:
+
+```bash
+git add trace-before-fix.txt trace.txt
+git commit -m "Add before-and-after race traces"
+```
+
+Git reported:
+
+```text
+[race-fix e8814dc] Add before-and-after race traces
+ 1 file changed, 50 insertions(+)
+ create mode 100644 trace-before-fix.txt
+```
+
+The assistant clarified that `trace.txt` was already tracked and unchanged,
+so the commit only added the new `trace-before-fix.txt` file.
