@@ -1,0 +1,53 @@
+# Race-condition harness trace
+# Generated: 2026-05-04T14:42:07.645Z
+# PORT=3100  SAVE_COMMIT_DELAY_MS=300  TRACE_START_MS=1777905720717
+#
+# Lines from [client       ] are emitted by harness/run-race.js.
+# Lines from [server #NNN  ] are emitted by app/server.js when TRACE_RACE=1.
+# All `[+NNNms]` deltas share the same epoch, so this is one merged timeline.
+[+ 5383ms] [client       ] harness up: PORT=3100, SAVE_COMMIT_DELAY_MS=300, TRACE_START_MS epoch shared with server
+--- SCENARIO A — control: save fully committed BEFORE publish ---
+[+ 5388ms] [server #000] reset newEpoch=1
+[+ 5396ms] [client       ] save "control" SENT (will await commit)
+[+ 5877ms] [server #001] draft.received content="control"
+[+ 6179ms] [server #002] draft.committed content="control"
+[+ 6186ms] [client       ] save "control" RESPONSE received: {"ok":true,"saved":"control"}
+[+ 6186ms] [client       ] publish SENT
+[+ 6188ms] [server #003] publish.received currentDraftBeforeWait="control"
+[+ 6189ms] [server #004] publish.read currentDraftRead="control"
+[+ 6189ms] [server #005] publish.assigned publishedDraft="control"
+[+ 6191ms] [client       ] publish RESPONSE: {"ok":true,"published":"control"}
+[+ 6191ms] [client       ] CONTROL RESULT: published="control" (expected "control") -> OK
+--- SCENARIO B — race: save B in flight when publish fires ---
+[+ 6193ms] [server #006] reset newEpoch=2
+[+ 6197ms] [client       ] save "draft A" SENT (will await commit)
+[+ 6204ms] [server #007] draft.received content="draft A"
+[+ 6504ms] [server #008] draft.committed content="draft A"
+[+ 6507ms] [client       ] save "draft A" RESPONSE: {"ok":true,"saved":"draft A"}
+[+ 6507ms] [client       ] save "draft B" SENT  (NOT awaited — in flight)
+[+ 6508ms] [client       ] publish SENT IMMEDIATELY (before save B can commit)
+[+ 6510ms] [server #009] draft.received content="draft B"
+[+ 6511ms] [server #010] publish.received currentDraftBeforeWait="draft A"
+[+ 6811ms] [server #011] draft.committed content="draft B"
+[+ 6812ms] [server #012] publish.read currentDraftRead="draft B"
+[+ 6812ms] [server #013] publish.assigned publishedDraft="draft B"
+[+ 6818ms] [client       ] save "draft B" RESPONSE (eventual): {"ok":true,"saved":"draft B"}
+[+ 6819ms] [client       ] publish RESPONSE: {"ok":true,"published":"draft B"}
+[+ 6827ms] [client       ] /current after race: {"current":"draft B"}
+[+ 6827ms] [client       ] RACE RESULT: published="draft B" (expected "draft B") -> no race observed
+
+
+--- SUMMARY ---
+control scenario:     PASS (publish saw the saved value)
+race scenario:        no race observed
+
+Interpretation:
+  - Publish was fired while save B was still in flight, but it waited
+    for the pending save to commit before reading currentDraft.
+
+  In the trace above, look for this fixed pattern in scenario B:
+    [server]  draft.received   content="draft B"              <-- save B request received
+    [server]  publish.received currentDraftBeforeWait="draft A" <-- publish arrives during the old state
+    [server]  draft.committed  content="draft B"              <-- save B commits
+    [server]  publish.read     currentDraftRead="draft B"     <-- publish reads the committed new value
+    [server]  publish.assigned publishedDraft="draft B"       <-- and marks the new value live
